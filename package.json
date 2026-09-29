@@ -1,0 +1,19 @@
+{
+  "name": "DouYin-Plugin",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "TRSS-Yunzai 抖音适配器插件",
+  "author": "dmmdekkd",
+  "homepage": "https://github.com/dmmdekkd/douyin.ts#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dmmdekkd/douyin.ts.git"
+  },
+  "bugs": {
+    "url": "https://github.com/dmmdekkd/douyin.ts/issues"
+  },
+  "dependencies": {
+    "douyin.ts": "*",
+    "qrcode": "^1.5.4"
+  }
+}
