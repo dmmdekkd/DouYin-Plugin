@@ -1344,13 +1344,14 @@ export class DouYinAdapter extends plugin {
 
   async Update() {
     // 复用核心更新插件（#更新DouYin），支持更新日志、依赖更新与更新后自动重启
+    // 核心 update 类构造不接收参数，this.e 需按加载器 Object.assign(new ..., { e }) 方式手动绑定
     this.e.msg = "#更新DouYin"
-    return new update(this.e).update()
+    return Object.assign(new update(), { e: this.e }).update()
   }
 
   async UpdateLog() {
     this.e.msg = "#更新日志DouYin"
-    return new update(this.e).updateLog()
+    return Object.assign(new update(), { e: this.e }).updateLog()
   }
 
   async Del() {
