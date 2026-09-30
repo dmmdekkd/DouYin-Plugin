@@ -1,5 +1,22 @@
 # 更新日志
 
+## 1.0.1 · 2026-09-29
+
+### 修复
+
+- 修复 `#抖音bot更新` / `#抖音bot更新日志` 复用核心更新插件时报错 `Cannot read properties of undefined (reading 'isMaster')`（核心 update 类构造不接收事件参数，需按加载器 `Object.assign(new ..., { e })` 方式手动绑定）
+
+### 许可与依赖
+
+- 采用 MIT 许可证（LICENSE）
+- package.json 声明 `license: MIT`
+- douyin.ts 依赖锁定指定版本 `0.6.0`，避免 `*` 解析回退旧版 SDK
+
+### 文档与工程
+
+- README 安装教程改为 git 方式，新增网络较差时的代理加速下载说明
+- 新增 `.gitignore`，忽略本地开发文件，避免更新拉取冲突
+
 ## 1.0.0 · 2026-09-29
 
 首个公开版本。

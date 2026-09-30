@@ -75,5 +75,6 @@ pnpm install
 
 ## 相关链接
 
+- 许可证：MIT（[LICENSE](LICENSE)）
 - SDK：https://github.com/dmmdekkd/douyin.ts
 - TRSS-Yunzai：https://github.com/TimeRainStarSky/Yunzai

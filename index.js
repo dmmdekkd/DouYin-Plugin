@@ -46,6 +46,8 @@ const adapter = new (class DouYinAdapter {
     )
     this.version = `${name} ${version}`
     this.logining = false
+    // 登录二次验证等待：{ kind: "sms"|"password", resolve, reject }，由验证码/密码指令消费
+    this.mfaWait = null
     // 断线重连状态：各账号已重试次数 / 主动登出标记
     this.reconnects = {}
     this.noReconnect = new Set()
@@ -1323,6 +1325,27 @@ export class DouYinAdapter extends plugin {
           )
           this.reply(["请使用抖音 App 扫码登录", segment.image(`base64://${base64}`)])
         },
+        onStatus: s => {
+          if (s && s !== "verified") this.reply(s, true)
+        },
+        // 触发短信/密码二次验证：交互式等待用户直接回复验证码/密码，5 分钟超时
+        onMfa: info =>
+          new Promise((resolve, reject) => {
+            const wait = { kind: info.kind, resolve, reject, userId: this.e.user_id }
+            if (info.kind === "password")
+              this.reply("登录触发密码二次验证，请直接回复账号密码完成验证", true)
+            else
+              this.reply(
+                `登录触发短信二次验证，验证码已发送${info.maskedMobile ? `（尾号 ${info.maskedMobile.slice(-4)}）` : ""}，请直接回复 6 位验证码`,
+                true,
+              )
+            adapter.mfaWait = wait
+            setTimeout(() => {
+              if (adapter.mfaWait !== wait) return
+              adapter.mfaWait = null
+              reject(new Error("二次验证等待超时"))
+            }, 5 * 60000)
+          }),
       })
 
       const token = `${session.userId}:${session.cookie}`
@@ -1340,6 +1363,22 @@ export class DouYinAdapter extends plugin {
     } finally {
       adapter.logining = false
     }
+  }
+
+  /** 登录二次验证交互：等待期间直接回复验证码/密码即可，无需额外命令 */
+  async accept(e) {
+    const wait = adapter.mfaWait
+    if (!wait) return
+    // 仅拦截登录发起者本人的消息；无法确认发起者（如终端登录）时不限制
+    if (wait.userId && e.user_id && String(e.user_id) !== String(wait.userId)) return
+    const msg = e.msg?.trim()
+    if (!msg || msg.startsWith("#")) return
+    // 短信验证码要求纯数字（4-6 位），密码等其他验证接受任意非指令文本
+    if (wait.kind === "sms" && !/^\d{4,6}$/.test(msg)) return
+    adapter.mfaWait = null
+    wait.resolve(msg)
+    // 拦截该消息，避免验证码被其他插件当作普通消息处理
+    return "return"
   }
 
   async Update() {
