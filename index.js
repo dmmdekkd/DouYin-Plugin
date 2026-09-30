@@ -4,7 +4,7 @@ import makeConfig from "../../lib/plugins/config.js"
 import QRCode from "qrcode"
 import md5 from "md5"
 import path from "node:path"
-import { readFileSync } from "node:fs"
+import { readFileSync, writeFileSync, rmSync, mkdirSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import * as douyin from "douyin.ts"
 import { update } from "../other/update.js"
@@ -70,32 +70,51 @@ const adapter = new (class DouYinAdapter {
 
     switch (msg.type) {
       case "text":
-        message.push({ type: "text", text: msg.text })
+        // 引用消息可能仅携带 refmsg 而无正文（text=""），为空不生成段，避免空气泡
+        if (msg.text) message.push({ type: "text", text: msg.text })
         break
       case "image": {
         const url =
           msg.image.thumbUrls?.[0] || msg.image.mediumUrls?.[0] || msg.image.largeUrls?.[0] || msg.image.originUrls?.[0]
-        if (url) message.push({ type: "image", file: url })
+        // file 保持 URL 字符串（兼容跨适配器转发），完整资源对象挂 resource 供发侧原样回传
+        if (url) message.push({ type: "image", file: url, resource: msg.image })
         if (msg.text) message.push({ type: "text", text: msg.text })
         break
       }
       case "video": {
-        // 封面图 + 播放地址（签名 URL 有时效，过期可 media.videoUrl 重取）
-        const cover = msg.video?.poster
-        const coverUrl = cover?.mediumUrls?.[0] || cover?.thumbUrls?.[0] || cover?.largeUrls?.[0] || cover?.originUrls?.[0]
-        if (coverUrl) message.push({ type: "image", file: coverUrl })
-        else if (msg.video?.inlinePic) message.push({ type: "image", file: `base64://${msg.video.inlinePic}` })
-        const videoUrl = msg.video?.url?.mainUrl
-        message.push({ type: "text", text: videoUrl ? `[视频] ${videoUrl}` : "[视频]" })
+        const video = msg.video
+        if (video?.tkey && video?.skey && video?.md5) {
+          // 收侧视频资源齐备时原样透传：SDK 服务端直接引用原视频，poster 内嵌视频体无需单独发封面
+          message.push({ type: "video", video })
+        } else {
+          // 资源缺失无法透传：封面图（如有）+ 播放地址提示文本
+          const coverUrl =
+            video?.poster?.mediumUrls?.[0] || video?.poster?.thumbUrls?.[0] ||
+            video?.poster?.largeUrls?.[0] || video?.poster?.originUrls?.[0]
+          if (coverUrl) message.push({ type: "image", file: coverUrl, resource: video?.poster })
+          else if (video?.inlinePic) message.push({ type: "image", file: `base64://${video.inlinePic}` })
+          const playUrl = video?.url?.mainUrl
+          message.push({ type: "text", text: playUrl ? `[视频] ${playUrl}` : "[视频]" })
+        }
+        // v0.6.2 起 parseBody 不再填充占位 "[视频]"，text 为真实文案或空串，非空才附带
         if (msg.text) message.push({ type: "text", text: msg.text })
         break
       }
-      case "file":
-        message.push({ type: "text", text: `[文件] ${msg.file?.name || msg.file?.md5 || ""}` })
-        if (msg.text) message.push({ type: "text", text: msg.text })
+      case "file": {
+        // 收侧文件资源（uri/skey/md5）齐备时原样透传：SDK 服务端直接引用原文件
+        if (msg.file?.uri && msg.file?.skey && msg.file?.md5) {
+          message.push({ type: "file", file: msg.file })
+        } else {
+          message.push({ type: "text", text: `[文件] ${msg.file?.name || msg.file?.md5 || ""}` })
+        }
+        // v0.6.2 起 parseBody 将文件名直接作为 text（不再填占位 "[文件]"），仅真实文案才附带（当前文件消息无正文）
+        if (msg.text && msg.text !== msg.file?.name) message.push({ type: "text", text: msg.text })
         break
+      }
       case "audio":
-        message.push({ type: "record", file: msg.audio?.urls?.[0] })
+        // SDK 不支持发送语音、收侧仅有短时签名 URL 无资源对象可透传，降级为文本提示
+        message.push({ type: "text", text: "[语音]" })
+        // v0.6.2 起 parseBody 不再填充占位 "[语音]"，text 为真实文案或空串，非空才附带
         if (msg.text) message.push({ type: "text", text: msg.text })
         break
       case "emoji":
@@ -171,16 +190,55 @@ const adapter = new (class DouYinAdapter {
         }
         case "image":
           flush()
-          image = await Bot.Buffer(i.file, { http: true })
+          image = await this.mediaSource(i.file, data.bot, true, i.resource)
           break
         case "record":
         case "file":
           flush()
-          msgs.push({ type: i.type, body: { type: "file", file: { source: await Bot.Buffer(i.file, { http: true }) } } })
+          msgs.push({ type: i.type, body: { type: "file", file: { source: await this.mediaSource(i.file, data.bot) } } })
           break
         case "video":
           flush()
-          msgs.push({ type: "video", body: { type: "video", video: { source: await Bot.Buffer(i.file, { http: true }) } } })
+          if (i.video?.tkey && i.video?.skey && i.video?.md5) {
+            // 收侧完整视频资源原样透传：SDK 服务端直接引用原视频，避免下载/重传
+            msgs.push({
+              type: "video",
+              body: {
+                type: "video",
+                video: {
+                  tkey: i.video.tkey,
+                  skey: i.video.skey,
+                  md5: i.video.md5,
+                  ...(i.video.poster ? { poster: i.video.poster } : {}),
+                  ...(typeof i.video.width === "number" ? { width: i.video.width } : {}),
+                  ...(typeof i.video.height === "number" ? { height: i.video.height } : {}),
+                },
+              },
+            })
+          } else {
+            msgs.push({ type: "video", body: { type: "video", video: { source: await this.mediaSource(i.file, data.bot) } } })
+          }
+          break
+        case "file":
+          flush()
+          if (i.file?.uri && i.file?.skey && i.file?.md5) {
+            // 收侧完整文件资源原样透传：SDK 服务端直接引用原文件
+            msgs.push({
+              type: "file",
+              body: {
+                type: "file",
+                file: {
+                  uri: i.file.uri,
+                  skey: i.file.skey,
+                  md5: i.file.md5,
+                  ...(i.file.name ? { name: i.file.name } : {}),
+                  ...(typeof i.file.dataSize === "number" ? { dataSize: i.file.dataSize } : {}),
+                },
+              },
+            })
+          } else {
+            msgs.push({ type: "file", body: { type: "file", file: { source: await this.mediaSource(i.file, data.bot) } } })
+          }
           break
         case "raw": {
           flush()
@@ -255,13 +313,20 @@ const adapter = new (class DouYinAdapter {
         if (body.atAll) brief += "@[所有人]"
         return brief + body.text
       case "image":
-        return `${brief}[图片:${md5(body.image)}]${body.text || ""}`
+        // body.image 可能为收侧 ImageResource 透传对象（原样回传原图）
+        return `${brief}[图片:${md5(body.image?.oid || body.image)}]${body.text || ""}`
       case "record":
         return `${brief}[语音:${md5(body.file.source)}]`
-      case "video":
-        return `${brief}[视频:${md5(body.video.source)}]`
-      case "file":
-        return `${brief}[文件:${md5(body.file.source)}]`
+      case "video": {
+        // body.video 可能是透传资源（tkey）或上传 source，对象不可直接 md5
+        const vid = body.video?.source || body.video?.tkey
+        return `${brief}[视频:${md5(vid && typeof vid !== "object" ? vid : "")}]`
+      }
+      case "file": {
+        // body.file 可能是透传资源（md5）或上传 source，对象不可直接 md5
+        const fid = body.file?.source || body.file?.md5
+        return `${brief}[文件:${md5(fid && typeof fid !== "object" ? fid : "")}]`
+      }
       case "raw":
         return (
           brief +
@@ -279,6 +344,70 @@ const adapter = new (class DouYinAdapter {
       default:
         return brief + JSON.stringify(body)
     }
+  }
+
+  // 魔数检测图片实际格式（SDK sniffImageFormat 仅支持 webp/jpeg/png/gif/heic，
+  // 多识别 avif/bmp 用于给出明确错误，避免笼统的 "unsupported image data"）
+  detectImgFormat(buf) {
+    const b = Buffer.from(buf)
+    if (b.length >= 12 && b.subarray(0, 4).toString() === "RIFF" && b.subarray(8, 12).toString() === "WEBP") return "webp"
+    if (b.length >= 2 && b[0] === 0xff && b[1] === 0xd8) return "jpeg"
+    if (b.length >= 8 && b.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) return "png"
+    if (b.length >= 6 && (b.subarray(0, 6).toString() === "GIF87a" || b.subarray(0, 6).toString() === "GIF89a")) return "gif"
+    if (b.length >= 12 && b.subarray(4, 8).toString() === "ftyp") {
+      for (let offset = 8; offset + 4 <= Math.min(b.length, 32); offset += 4) {
+        const brand = b.subarray(offset, offset + 4).toString()
+        if (["heic", "heix", "hevc", "hevx", "heim", "heis", "mif1", "msf1"].includes(brand)) return "heic"
+        if (brand === "avif") return "avif"
+      }
+    }
+    if (b.length >= 2 && b[0] === 0x42 && b[1] === 0x4d) return "bmp"
+    return "unknown"
+  }
+
+  // 媒体输入规范化：去首尾反引号（QQ 等来源遗留格式）；URL 带浏览器标识与账号 Cookie 主动下载为字节，
+  // 否则 SDK 内部下载（无 Cookie/UA）会被 CDN 拦截或返回非图片内容而报 unsupported image data；
+  // base64 与本地路径放行由核心处理；img=true 时校验字节确为 SDK 可上传图片格式。
+  // resource 为收侧 ImageResource 完整对象时原样透传（SDK 服务端直接引用原图，私有 CDN 字节无法重新上传）
+  async mediaSource(input, bot, img, resource) {
+    // 统一校验字节内容，图片场景给出明确错误并记录 debug 日志
+    const check = buf => {
+      if (!img) return new Uint8Array(buf)
+      const fmt = this.detectImgFormat(buf)
+      Bot.makeLog("debug", ["媒体图片", `${buf.length}B`, fmt], bot?.uin)
+      if (fmt === "avif" || fmt === "bmp")
+        throw new Error(`图片格式 ${fmt} 不受 SDK 支持，仅支持 png/jpeg/gif/webp/heic`)
+      if (fmt === "unknown")
+        throw new Error(`图片内容无效（${buf.length}B，无法识别图片格式），源数据可能损坏`)
+      return new Uint8Array(buf)
+    }
+    // 收侧 ImageResource 完整对象（oid/skey/md5 齐备）：SDK 服务端可直接引用原图资源，无需下载重传
+    if (img && resource && ["oid", "skey", "md5"].every(k => typeof resource[k] === "string")) return resource
+    if (Buffer.isBuffer(input) || input instanceof Uint8Array || input instanceof ArrayBuffer)
+      return check(input)
+    if (typeof input !== "string") return input
+    const s = input.trim().replace(/^`+|`+$/g, "")
+    if (/^https?:\/\//i.test(s)) {
+      const headers = {
+        "user-agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        referer: "https://www.douyin.com/",
+      }
+      // 抖音图片 CDN 需登录态，附上账号 Cookie
+      const cookie = bot?.getCookies?.()
+      if (cookie) headers.cookie = cookie
+      const res = await fetch(s, { headers, redirect: "follow" })
+      if (!res.ok) throw new Error(`媒体下载失败 HTTP ${res.status}`)
+      const type = (res.headers.get("content-type") || "").toLowerCase()
+      if (type && !type.startsWith("image/") && !["application/octet-stream", "binary/octet-stream"].includes(type))
+        throw new Error(`媒体下载失败：服务器返回 ${type}（URL 可能已失效或需登录）`)
+      const buf = Buffer.from(await res.arrayBuffer())
+      if (!buf.length) throw new Error("媒体下载为空")
+      Bot.makeLog("debug", ["媒体下载", s.slice(0, 80)], bot?.uin)
+      return check(buf)
+    }
+    const out = Bot.Buffer(s, { http: true })
+    return Buffer.isBuffer(out) || out instanceof Uint8Array || out instanceof ArrayBuffer ? check(out) : out
   }
 
   // 发送单条消息体（reply 优先走引用回复），statusCode 非 0 抛错由调用方统一处理
@@ -680,6 +809,14 @@ const adapter = new (class DouYinAdapter {
     }
     Bot[id].stat.recv_msg_cnt++
 
+    const message = this.makeMessageSegs(msg)
+    // 空内容消息（引用无正文 / 纯空文本）不构成有效消息，忽略避免空气泡
+    if (message.length === 0) {
+      Bot[id].stat.recv_msg_cnt--
+      Bot.makeLog("debug", `空内容消息已忽略：[${msg.serverMessageId}] from=${msg.senderUid}`, id)
+      return
+    }
+
     const data = {
       raw: msg,
       bot: Bot[id],
@@ -700,7 +837,7 @@ const adapter = new (class DouYinAdapter {
       is_thread_root: msg.isThreadRoot,
       index_in_conversation: msg.indexInConversation,
       ext: msg.ext,
-      message: this.makeMessageSegs(msg),
+      message,
       raw_message: msg.text || "",
     }
 
@@ -1047,8 +1184,37 @@ const adapter = new (class DouYinAdapter {
     Bot[id] = {
       adapter: this,
       sdk: new douyin.Bot(opts),
-      login() {
-        return this.sdk.start()
+      async login() {
+        // 复用持久化的设备身份（deviceId/installId/guid），避免每次重启重新注册设备导致消息异常（回显自身/他人不可见）
+        const devFile = path.join(this.adapter.path, id, "device.json")
+        let device
+        try {
+          const saved = JSON.parse(readFileSync(devFile, "utf8") || "{}")
+          if (saved.deviceId && saved.installId && saved.guid) device = saved
+        } catch {}
+        if (device) this.sdk.opts.device = device
+        try {
+          await this.sdk.start()
+        } catch (err) {
+          // 持久化设备身份可能已失效：清除后重新注册重试一次
+          if (!device) throw err
+          try { rmSync(devFile, { force: true }) } catch {}
+          delete this.sdk.opts.device
+          await this.sdk.start()
+        }
+        // 登录成功后持久化当前设备身份
+        const ins = this.sdk.httpInstance
+        if (ins?.deviceId && ins?.installId && ins?.guid) {
+          try {
+            mkdirSync(path.dirname(devFile), { recursive: true })
+            writeFileSync(
+              devFile,
+              JSON.stringify({ deviceId: ins.deviceId, installId: ins.installId, guid: ins.guid }, null, 2),
+            )
+          } catch (err) {
+            Bot.makeLog("warn", ["设备身份持久化失败", err], id)
+          }
+        }
       },
       logout() {
         // 主动登出标记，避免 close 事件触发自动重连
@@ -1324,9 +1490,6 @@ export class DouYinAdapter extends plugin {
             "",
           )
           this.reply(["请使用抖音 App 扫码登录", segment.image(`base64://${base64}`)])
-        },
-        onStatus: s => {
-          if (s && s !== "verified") this.reply(s, true)
         },
         // 触发短信/密码二次验证：交互式等待用户直接回复验证码/密码，5 分钟超时
         onMfa: info =>

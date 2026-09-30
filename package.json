@@ -1,6 +1,6 @@
 {
   "name": "DouYin-Plugin",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "type": "module",
   "description": "TRSS-Yunzai 抖音适配器插件",
   "license": "MIT",
