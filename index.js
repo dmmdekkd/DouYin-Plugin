@@ -59,7 +59,12 @@ const adapter = new (class DouYinAdapter {
   makeSDKLog(id) {
     return {
       info: msg => Bot.makeLog("debug", msg, id),
-      warn: msg => Bot.makeLog("warn", msg, id),
+      // SDK 传输层每次调用失败都会 warn 一次（如 cmd=203 get_by_user_init 重试 3 次），
+      // cookie 失效时多触发点叠加会疯狂刷屏；此类自动重试噪音降级为 debug，只保留插件侧的最终失效提示
+      warn: msg =>
+        /^cmd=\d+ .*失败/.test(msg)
+          ? Bot.makeLog("debug", msg, id)
+          : Bot.makeLog("warn", msg, id),
       error: msg => Bot.makeLog("error", msg, id),
     }
   }
@@ -490,7 +495,8 @@ const adapter = new (class DouYinAdapter {
   async sendFriendMsg(data, msg) {
     if (!data.chatId) {
       await this.loadFriend(data.self_id)
-      Object.assign(data, Bot[data.self_id].fl.get(data.user_id) || {})
+      // loadFriend 检测到 cookie 失效时会移除账号，Bot[id] 可能已不存在
+      Object.assign(data, Bot[data.self_id]?.fl.get(data.user_id) || {})
       if (!data.chatId) {
         Bot.makeLog("error", [`发送好友消息失败：[${data.user_id}] 不存在会话信息`, msg], data.self_id)
         return false
@@ -749,6 +755,13 @@ const adapter = new (class DouYinAdapter {
           chatId: i.chatId,
         })
     } catch (err) {
+      // 运行期 cookie 失效（get_by_user_init 报 unexpected session length）：移除账号并禁止重连，
+      // 避免 SDK 自动重连后仍持续拉取会话列表刷报错
+      if (/session length/i.test(String(err?.message || err))) {
+        this.noReconnect.add(id)
+        await this.removeBot(id)
+        return Bot.makeLog("error", `${id} 登录状态已失效（cookie 校验失败），账号已移除，请使用 #抖音bot登录 重新扫码`, id)
+      }
       Bot.makeLog("error", ["好友列表获取错误", err], id)
     }
   }
@@ -1129,11 +1142,21 @@ const adapter = new (class DouYinAdapter {
     Bot.em(`request.${data.request_type}`, data)
   }
 
-  // 断开并移除账号：清刷新定时器、登出、删 Bot、清 Bot.uin 残留（防核心遍历无效 id 抛错）
-  removeBot(id) {
+  // 断开并移除账号：清刷新定时器、关闭 leveldb、登出、删 Bot、清 Bot.uin 残留（防核心遍历无效 id 抛错）
+  async removeBot(id) {
     clearInterval(this.refreshes[id])
     delete this.refreshes[id]
-    Bot[id]?.logout()
+    const bot = Bot[id]
+    if (bot) {
+      // 关闭已打开的好友/群/成员 leveldb 句柄，否则同一账号重连（重复登录/断线重连）时
+      // 再次 getMap 打开同目录会因 LOCK 文件占用报 LEVEL_LOCKED（Database failed to open）
+      await Promise.all(
+        [bot.fl, bot.gl, bot.gml].map(m =>
+          m?.db?.close?.().catch(err => Bot.makeLog("warn", ["关闭数据库错误", err], id)),
+        ),
+      )
+    }
+    bot?.logout()
     delete Bot[id]
     const idx = Bot.uin.indexOf(id)
     if (idx !== -1) Bot.uin.splice(idx, 1)
@@ -1168,10 +1191,11 @@ const adapter = new (class DouYinAdapter {
     }
     Bot.makeLog("debug", `开始连接账号 ${id}`, this.id)
 
-    // 重复登录时先断开旧连接，避免双连接
+    // 重复登录时先断开旧连接，避免双连接；必须等待旧连接的 leveldb 关闭，
+    // 否则下方重建 Bot 后 getMap 再次打开同目录会因 LOCK 占用报 LEVEL_LOCKED
     if (Bot[id]?.sdk) {
       Bot.makeLog("warn", `账号 ${id} 已连接，正在断开旧连接`, this.id)
-      this.removeBot(id)
+      await this.removeBot(id)
     }
 
     const opts = {
@@ -1299,19 +1323,27 @@ const adapter = new (class DouYinAdapter {
       replys: {},
     }
 
-    // 注册到核心账号列表（Bot.uin.toString 随机取号、Bot.xxx 重定向依赖）
-    if (!Bot.uin.includes(id)) Bot.uin.push(id)
-
     try {
       await Bot[id].login()
       Object.assign(Bot[id].info, await Bot[id].sdk.user.self())
+      // cookie 有效性校验：get_by_user_init（好友会话初始化）报 unexpected session length 说明 cookie 失效
+      await Bot[id].sdk.frd.list()
     } catch (err) {
-      Bot.makeLog("error", [`${this.name}(${this.id}) ${this.version} 连接失败`, err], id)
-      this.removeBot(id)
-      this.noReconnect.delete(id)
+      const invalid = /session length/i.test(String(err?.message || err))
+      // cookie 失效（session length）时 SDK 反复重试已产生大量 debug 噪音，此处不再重复大堆栈，只提示重登
+      if (!invalid)
+        Bot.makeLog("error", [`${this.name}(${this.id}) ${this.version} 连接失败`, err], id)
+      if (invalid)
+        Bot.makeLog("error", `${id} 登录状态已失效（cookie 校验失败），已被移除，请使用 #抖音bot登录 重新扫码`, id)
+      this.noReconnect.add(id)
+      await this.removeBot(id)
       return false
     }
     this.noReconnect.delete(id)
+
+    // 注册到核心账号列表（Bot.uin.toString 随机取号、Bot.xxx 重定向依赖）；
+    // 移至 cookie 校验通过后才注册，避免失效账号进入在线态
+    if (!Bot.uin.includes(id)) Bot.uin.push(id)
 
     // 在线状态开关 + im 活跃心跳（登录后打一次）
     if (config.bot.activeStatus)
@@ -1380,7 +1412,11 @@ const adapter = new (class DouYinAdapter {
     Bot[id].sdk.on("status", event => this.makeStatus(id, event))
     Bot[id].sdk.on("request", event => this.makeRequest(id, event))
     Bot[id].sdk.on("read", event => Bot.makeLog("debug", ["单聊已读回执", event], id))
-    Bot[id].sdk.on("reconnecting", event => Bot.makeLog("debug", ["连接重连中", event], id))
+    Bot[id].sdk.on("reconnecting", event => {
+      Bot.makeLog("debug", ["连接重连中", event], id)
+      // 重连期间趁机校验 cookie：失效（session length）时 loadFriend 内部会移除账号，避免反复重试刷报错
+      this.loadFriend(id)
+    })
     Bot[id].sdk.on("close", event => this.reconnect(id, event))
 
     Bot.makeLog(
@@ -1427,7 +1463,7 @@ setInterval(() => {
   for (const [id, token] of cur)
     if (oldTokens.get(id) !== token) adapter.connect(token)
   for (const id of oldTokens.keys())
-    if (!cur.has(id)) adapter.removeBot(id)
+    if (!cur.has(id)) adapter.removeBot(id).catch(err => Bot.makeLog("warn", ["移除账号数据库错误", err], id))
   oldTokens = cur
 }, 30000).unref?.()
 
@@ -1562,7 +1598,7 @@ export class DouYinAdapter extends plugin {
     if (!token) return this.reply("账号不存在", true)
 
     config.token = config.token.filter(i => i !== token)
-    this.removeBot(id)
+    await this.removeBot(id)
     this.reply(`账号已删除，共${config.token.length}个账号`, true)
     return configSave()
   }

@@ -1,5 +1,16 @@
 # 更新日志
 
+## 1.0.5 · 2026-10-03
+
+### 修复
+
+- 登录 Cookie 校验：账号登录后、注册进在线账号列表前先拉取好友会话列表校验 Cookie，`get_by_user_init` 报 `unexpected session length` 即判定登录态失效，不再注册该账号，并提示 `请使用 #抖音bot登录 重新扫码`
+- 运行期 Cookie 失效检测：好友 / 群列表刷新时同样判定 `session length` 失效，直接移除账号并禁止重连，避免 SDK 自动重连后仍持续拉取会话列表刷屏 `cmd=203 get_by_user_init 失败`
+- 重连事件触发 Cookie 校验：SDK 自动重连（reconnecting）时同步校验登录态，失效即移除
+- 日志降噪：Cookie 失效时仅打印「登录状态已失效」一条提示，不再输出 cmd=203 刷屏 WARN 与「连接失败」大堆栈；SDK 传输层请求失败日志降级为 debug 级
+- 发送消息空引用防护：账号被移除后残留引用触发消息时不再抛 TypeError
+- 打开数据库报错 `Database failed to open`（LEVEL_LOCKED）：移除账号时同步关闭好友 / 群 / 成员 leveldb 句柄，修复同一账号重复登录 / 断线重连时因 LOCK 文件占用导致的数据库打不开
+
 ## 1.0.4 · 2026-10-01
 
 ### 文档
