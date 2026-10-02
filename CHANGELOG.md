@@ -1,5 +1,11 @@
 # 更新日志
 
+## 1.0.4 · 2026-10-01
+
+### 文档
+
+- README 新增「使用其他框架」指引：本插件面向 TRSS-Yunzai 运行时，如需在其他框架中使用抖音相关能力，可参考 [zhin-adapter-douyin](https://github.com/zhinjs/zhin-adapter-douyin)（Zhin 框架）与 [karin-plugin-adapter-douyin](https://github.com/dmmdekkd/karin-plugin-adapter-douyin)（Karin 框架）
+
 ## 1.0.2 · 2026-09-29
 
 ### 新增
