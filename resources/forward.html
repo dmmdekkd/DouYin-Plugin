@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: "PingFang SC", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+      background: #f2f3f5;
+      -webkit-font-smoothing: antialiased;
+    }
+    #container {
+      width: 620px;
+      background: #ffffff;
+      border-radius: 16px;
+      overflow: hidden;
+      border: 1px solid #eceef1;
+    }
+
+    /* 头部 */
+    .header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 18px 22px;
+      background: linear-gradient(135deg, #fff5f7 0%, #ffffff 70%);
+      border-bottom: 1px solid #f2f3f5;
+    }
+    .title { display: flex; align-items: center; font-size: 16px; font-weight: 600; color: #1a1a1a; letter-spacing: .3px; }
+    .accent { width: 4px; height: 16px; border-radius: 2px; background: linear-gradient(180deg, #fe2c55, #ff6b9d); margin-right: 9px; }
+    .count { font-size: 12px; color: #8a9099; background: #f2f3f5; padding: 3px 10px; border-radius: 999px; }
+
+    /* 列表 */
+    .list { padding: 6px 22px 2px; }
+    .row { display: flex; padding: 13px 0; }
+    .row + .row { border-top: 1px solid #f6f7f9; }
+
+    .avatar {
+      flex: 0 0 40px; width: 40px; height: 40px; border-radius: 50%; margin-right: 12px;
+      display: flex; align-items: center; justify-content: center; overflow: hidden;
+      color: #ffffff; font-size: 17px; font-weight: 600;
+    }
+    img.avatar { display: block; object-fit: cover; background: #f2f3f5; }
+    .content { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+    .name { font-size: 12px; color: #9aa0a6; margin-bottom: 6px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    /* 文本气泡 */
+    .text {
+      align-self: flex-start; max-width: 100%; margin-bottom: 6px;
+      padding: 9px 13px; background: #f5f6f8; border-radius: 3px 12px 12px 12px;
+      font-size: 14px; line-height: 1.6; color: #242424;
+      word-break: break-word; white-space: pre-wrap;
+    }
+    /* 图片缩略图 */
+    .pic {
+      position: relative; align-self: flex-start; margin-bottom: 6px;
+      border-radius: 12px; overflow: hidden; background: #f5f6f8;
+      box-shadow: 0 2px 10px rgba(0, 0, 0, .07); line-height: 0;
+    }
+    .pic img { display: block; max-width: 320px; max-height: 400px; }
+    .badge {
+      position: absolute; left: 8px; bottom: 8px;
+      padding: 3px 9px; border-radius: 999px; background: rgba(0, 0, 0, .55);
+      color: #ffffff; font-size: 12px; line-height: 1.4;
+    }
+    .cap { font-size: 13px; color: #565b61; margin-bottom: 6px; word-break: break-word; white-space: pre-wrap; }
+    /* 其他类型标签 */
+    .chip {
+      align-self: flex-start; max-width: 100%; margin-bottom: 6px;
+      padding: 9px 13px; background: #f5f6f8; border-radius: 12px;
+      font-size: 13px; color: #8a9099; word-break: break-word; white-space: pre-wrap;
+    }
+    .content > *:last-child { margin-bottom: 0; }
+
+    /* 嵌套合并转发：内嵌「聊天记录」小卡片（递归层级逐级紧凑） */
+    .fwd {
+      align-self: flex-start; max-width: 100%; margin-bottom: 6px;
+      border: 1px solid #eceef1; border-radius: 12px; background: #fafbfc; overflow: hidden;
+    }
+    .fwd-head {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 8px 12px; background: #f5f6f8; border-bottom: 1px solid #eceef1;
+    }
+    .fwd-title { display: flex; align-items: center; font-size: 12px; font-weight: 600; color: #57606a; }
+    .fwd-title::before {
+      content: ""; width: 3px; height: 11px; border-radius: 2px;
+      background: linear-gradient(180deg, #fe2c55, #ff6b9d); margin-right: 6px;
+    }
+    .fwd-count { font-size: 11px; color: #9aa0a6; }
+    .fwd-list { padding: 2px 12px; }
+    .fwd .row { padding: 9px 0; }
+    .fwd .row + .row { border-top: 1px solid #f2f3f5; }
+    .fwd .avatar { flex: 0 0 26px; width: 26px; height: 26px; font-size: 12px; margin-right: 8px; }
+    .fwd .name { font-size: 11px; margin-bottom: 4px; }
+    .fwd .text { font-size: 12.5px; padding: 6px 10px; }
+    .fwd .pic img { max-width: 200px; max-height: 240px; }
+    .fwd .cap { font-size: 12px; }
+    .fwd .chip { font-size: 12px; padding: 6px 10px; }
+    .fwd .fwd-list { padding: 2px 10px; }
+
+    /* 底部 */
+    .footer { text-align: center; font-size: 12px; color: #c2c6cc; padding: 14px 0 16px; letter-spacing: .5px; }
+  </style>
+</head>
+
+<body>
+  <div id="container">
+    <div class="header">
+      <div class="title"><span class="accent"></span>{{title}}</div>
+      <div class="count">{{desc}}</div>
+    </div>
+    <div class="list">{{@listHTML}}</div>
+    <div class="footer">抖音 · 合并转发</div>
+  </div>
+</body>
+
+</html>
