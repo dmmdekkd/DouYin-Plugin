@@ -314,7 +314,7 @@ const adapter = new (class DouYinAdapter {
         case "markdown":
           continue
         case "node": {
-          // 合并转发：收集节点消息体，sendMsg 阶段先真实发送再引用构建 forward 卡片
+          // 合并转发：收集节点消息体，sendMsg 阶段由 SDK 原生 sendMergeForward 一次组卡发送
           const bodies = []
           for (const { message } of i.data)
             for (const seg of await this.makeMsg(data, message, true))
@@ -453,28 +453,22 @@ const adapter = new (class DouYinAdapter {
     return ret
   }
 
-  // 合并转发：协议要求引用会话内已发送消息，先逐条真实发送节点收集 msgId，
-  // 再组装 forward 卡片，最后撤回节点原消息（群聊无撤回权限会留痕，协议限制）
+  // 合并转发：直接走 SDK 原生 sendMergeForward（msg.send type=forward）一次组卡发送，
+  // 不再先逐条真发节点再撤回——旧实现会「先发送后撤回」造成闪屏/留痕。
+  // 节点携带真实消息 id（转发真实聊天记录）时直接透传；纯生成内容无真实 id 给占位 id "0"，
+  // 卡片按节点 text 预览渲染。发送失败仅报错，不做降级。
   async sendForward(data, { bodies }, rets) {
     // 节点消息类型映射（7 文本 / 27 图片 / 30 视频 / 136 转发 / 152 接龙，未知给 0）
     const fwdType = { text: [7, 700], image: [27, 2702], video: [30, 0], forward: [136, 0], chains: [152, 0] }
-    const nodes = [],
-      sent = []
     try {
-      for (const seg of bodies) {
-        const ret = await this.sendBody(data, seg)
-        rets.data.push(ret)
-        if (!ret.serverMessageId) throw new Error("节点消息发送失败，无法构建合并转发")
-        sent.push(String(ret.serverMessageId))
-        nodes.push({
-          uid: String(data.self_id),
-          nickname: data.bot.nickname,
-          text: this.makeBrief(seg),
-          msgType: fwdType[seg.type]?.[0] ?? 0,
-          aweType: fwdType[seg.type]?.[1] ?? 0,
-          msgId: String(ret.serverMessageId),
-        })
-      }
+      const nodes = bodies.map(seg => ({
+        uid: String(data.self_id),
+        nickname: data.bot.nickname,
+        text: this.makeBrief(seg),
+        msgType: fwdType[seg.type]?.[0] ?? 0,
+        aweType: fwdType[seg.type]?.[1] ?? 0,
+        msgId: String(seg.msgId ?? seg.serverMessageId ?? "0"),
+      }))
       Bot.makeLog("info", `send to ${data.group_id ? `Group(${data.group_id})` : `User(${data.user_id})`}: [合并转发:${nodes.length}条]`, data.self_id)
       const ret = await data.bot.sdk.msg.send(data.chatId, { type: "forward", nodes })
       rets.data.push(ret)
@@ -486,8 +480,6 @@ const adapter = new (class DouYinAdapter {
         Bot.makeLog("error", `${data.self_id} 登录状态已失效，请使用 #抖音bot登录 重新扫码`, data.self_id)
       rets.error.push(err)
     }
-    for (const msgId of sent)
-      data.bot.sdk.msg.recall(data.chatId, msgId).catch(err => Bot.makeLog("debug", ["合并转发节点撤回失败", msgId, err], data.self_id))
   }
 
   async sendMsg(data, msg) {
