@@ -1,6 +1,6 @@
 {
   "name": "DouYin-Plugin",
-  "version": "1.0.5",
+  "version": "1.0.7",
   "type": "module",
   "description": "TRSS-Yunzai 抖音适配器插件",
   "license": "MIT",
@@ -14,7 +14,7 @@
     "url": "https://github.com/dmmdekkd/douyin.ts/issues"
   },
   "dependencies": {
-    "douyin.ts": "0.6.0",
+    "douyin.ts": "0.6.6",
     "qrcode": "^1.5.4"
   }
 }

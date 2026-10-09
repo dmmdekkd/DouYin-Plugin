@@ -1,5 +1,21 @@
 # 更新日志
 
+## 1.0.6 · 2026-10-09
+
+### 依赖
+
+- 升级 douyin.ts `0.6.5` → `0.6.6`（新增设备身份持久化能力）
+
+### 新增
+
+- 设备身份持久化适配：连接时读取 `data/DouYin/<uid>/device.json` 注入 `BotOpts.device`，`start()` 后回写；`#抖音bot登录` 登录成功后落盘本次设备身份。复用同一设备身份后跳过设备注册，避免每次启动重新注册导致身份不稳定触发登录二次验证
+- 用户资料批量接口：`e.bot.getUserInfo(secUids)` 暴露 SDK `user.info`（按 secUid 批量查昵称/头像/签名/抖音号/关系，50/批）；连接后与每 30 分钟刷新时后台批量补全好友缓存的 `uniqueId`（抖音号）、`shortId`、`signature`、`avatar`，插件可直接读 `e.bot.pickFriend(uid).uniqueId`
+- 群成员资料补全：`pickMember.getInfo()` 由原 `grp.members` 单查改为按成员 `secUid` 走 `user.info` 补全真实昵称/头像/抖音号，并落库 `secUid`（此前群成员无 `secUid`，无法查资料）
+
+### 优化
+
+- 重写启动期 Cookie 校验：去除 `user.self()` + `frd.list()` + `grp.list()` 三连探针，改为仅以「群列表」（原生通道 `listNativeGroups`）单次校验——失效时首个请求即抛 `unexpected session length`（无重试），秒级失败；好友/群列表不再在校验与 `loadFriend`/`loadGroup` 中重复全量翻页，启动更快
+
 ## 1.0.5 · 2026-10-03
 
 ### 修复

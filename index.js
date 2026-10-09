@@ -4,7 +4,7 @@ import makeConfig from "../../lib/plugins/config.js"
 import QRCode from "qrcode"
 import md5 from "md5"
 import path from "node:path"
-import { readFileSync, writeFileSync, rmSync, mkdirSync } from "node:fs"
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import * as douyin from "douyin.ts"
 import { update } from "../other/update.js"
@@ -66,6 +66,31 @@ const adapter = new (class DouYinAdapter {
           ? Bot.makeLog("debug", msg, id)
           : Bot.makeLog("warn", msg, id),
       error: msg => Bot.makeLog("error", msg, id),
+    }
+  }
+
+  // 设备身份落盘路径：与好友/群列表同账号目录
+  deviceFile(id) {
+    return `${this.path}${id}/device.json`
+  }
+
+  // 读取已持久化设备身份（douyin.ts 0.6.6 起支持）；不存在或损坏时返回 undefined，由 SDK 重新注册
+  loadDevice(id) {
+    try {
+      return JSON.parse(readFileSync(this.deviceFile(id), "utf8"))
+    } catch {
+      return undefined
+    }
+  }
+
+  // 持久化设备身份：下次构造/登录注入同一设备，避免每次启动重新注册导致身份不稳定触发二次验证
+  saveDevice(id, device) {
+    if (!device) return
+    try {
+      mkdirSync(path.dirname(this.deviceFile(id)), { recursive: true })
+      writeFileSync(this.deviceFile(id), JSON.stringify(device))
+    } catch (err) {
+      Bot.makeLog("warn", ["设备身份落盘失败", id, err], this.id)
     }
   }
 
@@ -650,8 +675,33 @@ const adapter = new (class DouYinAdapter {
       getInfo: async () => {
         const chatId = i.bot.gl.get(group_id)?.chatId
         if (!chatId) return i
-        const members = await i.bot.sdk.grp.members(chatId)
-        return members.find(member => member.uid === user_id) || i
+        const member = (await i.bot.sdk.grp.members(chatId)).find(m => m.uid === user_id)
+        if (!member) return i
+        // 群成员列表（605）不含昵称/头像，用 IM 批量接口按 secUid 补全，并落库 secUid/抖音号供后续读取
+        const [user] = member.secUid ? await i.bot.sdk.user.info([member.secUid]) : []
+        const data = {
+          ...i,
+          ...member,
+          ...(user ? {
+            nickname: user.nickname || i.nickname,
+            avatar: user.avatar || i.avatar,
+            signature: user.signature ?? i.signature,
+            uniqueId: user.uniqueId ?? i.uniqueId,
+            shortId: user.shortId ?? i.shortId,
+          } : {}),
+        }
+        const gml = i.bot.gml.get(group_id)
+        if (gml)
+          await gml.set(user_id, {
+            ...gml.get(user_id),
+            user_id,
+            nickname: data.nickname,
+            secUid: member.secUid,
+            avatar: data.avatar,
+            uniqueId: data.uniqueId,
+            shortId: data.shortId,
+          })
+        return data
       },
       kickOut: async () => {
         const chatId = i.bot.gl.get(group_id)?.chatId
@@ -744,9 +794,10 @@ const adapter = new (class DouYinAdapter {
     }
   }
 
-  async loadFriend(id) {
+  // list 可由调用方预取（connect 时复用 cookie 校验阶段的结果），缺省则现拉，避免重复全量翻页
+  async loadFriend(id, list) {
     try {
-      for (const i of await Bot[id].sdk.frd.list())
+      for (const i of list ?? await Bot[id].sdk.frd.list())
         Bot[id].fl.set(i.uid, {
           ...Bot[id].fl.get(i.uid),
           user_id: i.uid,
@@ -766,9 +817,10 @@ const adapter = new (class DouYinAdapter {
     }
   }
 
-  async loadGroup(id) {
+  // list 说明同 loadFriend：可复用 cookie 校验阶段已拉取的群列表
+  async loadGroup(id, list) {
     try {
-      for (const i of await Bot[id].sdk.grp.list())
+      for (const i of list ?? await Bot[id].sdk.grp.list())
         if (i.isGroup)
           Bot[id].gl.set(i.conversationShortId, {
             ...Bot[id].gl.get(i.conversationShortId),
@@ -778,7 +830,44 @@ const adapter = new (class DouYinAdapter {
             chatId: i.chatId,
           })
     } catch (err) {
+      // 群列表同样可能报 unexpected session length（cookie 失效）：与 loadFriend 一致，移除账号并禁止重连
+      if (/session length/i.test(String(err?.message || err))) {
+        this.noReconnect.add(id)
+        await this.removeBot(id)
+        return Bot.makeLog("error", `${id} 登录状态已失效（cookie 校验失败），账号已移除，请使用 #抖音bot登录 重新扫码`, id)
+      }
       Bot.makeLog("error", ["群列表获取错误", err], id)
+    }
+  }
+
+  // 批量拉用户资料（IM user.info，50/批），按 secUid 建索引；失败返回空 Map，不阻断调用方
+  async fetchUserInfo(id, secUids) {
+    const list = [...new Set((secUids || []).filter(Boolean))]
+    if (!list.length) return new Map()
+    const info = await Bot[id].sdk.user.info(list).catch(err => {
+      Bot.makeLog("warn", ["用户资料批量获取失败", err], id)
+      return []
+    })
+    return new Map(info.map(i => [i.secUid, i]))
+  }
+
+  // 批量补全好友缓存的抖音号/短号/签名/头像，落库后插件可直接读 e.bot.pickFriend(uid).uniqueId；
+  // 单次请求覆盖 50 个好友，避免逐个 profileScene 拖慢
+  async enrichFriends(id) {
+    const rows = [...Bot[id].fl.values()].filter(i => i.secUid)
+    if (!rows.length) return
+    const info = await this.fetchUserInfo(id, rows.map(i => i.secUid))
+    for (const row of rows) {
+      const u = info.get(row.secUid)
+      if (!u) continue
+      await Bot[id].fl.set(row.user_id, {
+        ...row,
+        nickname: u.nickname || row.nickname,
+        avatar: u.avatar || row.avatar,
+        signature: u.signature ?? row.signature,
+        uniqueId: u.uniqueId ?? row.uniqueId,
+        shortId: u.shortId ?? row.shortId,
+      })
     }
   }
 
@@ -1202,44 +1291,45 @@ const adapter = new (class DouYinAdapter {
       ...config.bot,
       cookie,
       userId: id,
+      // 注入已持久化设备身份（douyin.ts 0.6.6）：跳过设备注册，避免每次启动重新注册导致身份不稳定触发登录二次验证
+      device: this.loadDevice(id),
       log: this.makeSDKLog(id),
     }
 
+    // 登录状态校验前移：先完成登录并做一次轻量 cookie 校验，失效则不注册 Bot[id]，避免失效账号进入在线态
+    const sdk = new douyin.Bot(opts)
+    let self
+    let friends = []
+    let groups = []
+    try {
+      // 设备身份由 SDK 内部注册：未注入 device 时 start() 自动注册，注入（device.json）则跳过
+      await sdk.start()
+      // 取回本次使用的设备身份并落盘，供下次构造/登录复用，避免重复注册
+      this.saveDevice(id, sdk.device)
+      // cookie 校验只用一次「群列表」（原生通道 listNativeGroups）：cookie 失效时首个请求即返回
+      // unexpected session length 并抛错（无重试），秒级失败，账号在注册 Bot[id] 前被挡下；
+      // 校验通过时该结果直接用于群缓存，避免与 loadGroup 重复全量翻页。
+      // 好友列表走 cookie 通道，失效时会静默重试 3 次（约 3s）且异常被 SDK 吞掉，不可靠，
+      // 故仅在群校验通过后再与自身资料一并拉取，且结果同样复用，整体仅拉一次。
+      groups = await sdk.grp.list()
+      ;[friends, self] = await Promise.all([sdk.frd.list(), sdk.user.self()])
+    } catch (err) {
+      const invalid = /session length/i.test(String(err?.message || err))
+      // cookie 失效（session length）时 SDK 反复重试已产生大量 debug 噪音，此处不再重复大堆栈，只提示重登
+      if (!invalid)
+        Bot.makeLog("error", [`${this.name}(${this.id}) ${this.version} 连接失败`, err], id)
+      if (invalid)
+        Bot.makeLog("error", `${id} 登录状态已失效（cookie 校验失败），账号未注册，请使用 #抖音bot登录 重新扫码`, id)
+      this.noReconnect.add(id)
+      sdk.stop()
+      return false
+    }
+    this.noReconnect.delete(id)
+
     Bot[id] = {
       adapter: this,
-      sdk: new douyin.Bot(opts),
-      async login() {
-        // 复用持久化的设备身份（deviceId/installId/guid），避免每次重启重新注册设备导致消息异常（回显自身/他人不可见）
-        const devFile = path.join(this.adapter.path, id, "device.json")
-        let device
-        try {
-          const saved = JSON.parse(readFileSync(devFile, "utf8") || "{}")
-          if (saved.deviceId && saved.installId && saved.guid) device = saved
-        } catch {}
-        if (device) this.sdk.opts.device = device
-        try {
-          await this.sdk.start()
-        } catch (err) {
-          // 持久化设备身份可能已失效：清除后重新注册重试一次
-          if (!device) throw err
-          try { rmSync(devFile, { force: true }) } catch {}
-          delete this.sdk.opts.device
-          await this.sdk.start()
-        }
-        // 登录成功后持久化当前设备身份
-        const ins = this.sdk.httpInstance
-        if (ins?.deviceId && ins?.installId && ins?.guid) {
-          try {
-            mkdirSync(path.dirname(devFile), { recursive: true })
-            writeFileSync(
-              devFile,
-              JSON.stringify({ deviceId: ins.deviceId, installId: ins.installId, guid: ins.guid }, null, 2),
-            )
-          } catch (err) {
-            Bot.makeLog("warn", ["设备身份持久化失败", err], id)
-          }
-        }
-      },
+      sdk,
+      login: () => sdk.start(),
       logout() {
         // 主动登出标记，避免 close 事件触发自动重连
         this.adapter.noReconnect.add(id)
@@ -1250,6 +1340,7 @@ const adapter = new (class DouYinAdapter {
       info: {
         id,
         ...opts,
+        ...self,
       },
       get nickname() {
         return this.info.nickname || this.uin
@@ -1323,24 +1414,6 @@ const adapter = new (class DouYinAdapter {
       replys: {},
     }
 
-    try {
-      await Bot[id].login()
-      Object.assign(Bot[id].info, await Bot[id].sdk.user.self())
-      // cookie 有效性校验：get_by_user_init（好友会话初始化）报 unexpected session length 说明 cookie 失效
-      await Bot[id].sdk.frd.list()
-    } catch (err) {
-      const invalid = /session length/i.test(String(err?.message || err))
-      // cookie 失效（session length）时 SDK 反复重试已产生大量 debug 噪音，此处不再重复大堆栈，只提示重登
-      if (!invalid)
-        Bot.makeLog("error", [`${this.name}(${this.id}) ${this.version} 连接失败`, err], id)
-      if (invalid)
-        Bot.makeLog("error", `${id} 登录状态已失效（cookie 校验失败），已被移除，请使用 #抖音bot登录 重新扫码`, id)
-      this.noReconnect.add(id)
-      await this.removeBot(id)
-      return false
-    }
-    this.noReconnect.delete(id)
-
     // 注册到核心账号列表（Bot.uin.toString 随机取号、Bot.xxx 重定向依赖）；
     // 移至 cookie 校验通过后才注册，避免失效账号进入在线态
     if (!Bot.uin.includes(id)) Bot.uin.push(id)
@@ -1351,7 +1424,6 @@ const adapter = new (class DouYinAdapter {
     Bot[id].sdk.user.heartbeat().catch(err => Bot.makeLog("debug", ["心跳上报失败", err], id))
 
     // 将 SDK 中 Yunzai 未覆盖的 API 挂到 bot 上，插件可通过 e.bot.xxx 直接调用
-    const sdk = Bot[id].sdk
     Object.assign(Bot[id], {
       // msg：输入状态/语音通话/表情回应/已读/编辑
       sendTyping: (chatId, typing) => sdk.msg.sendTyping(chatId, typing),
@@ -1392,6 +1464,8 @@ const adapter = new (class DouYinAdapter {
       // user：资料/在线状态
       getUserProfile: secUid => sdk.user.profileScene(secUid),
       getUserProfileOther: secUid => sdk.user.profileOther(secUid),
+      // 按 secUid 批量查用户资料（昵称/头像/签名/抖音号/关系，50/批），比逐个 profileScene 快
+      getUserInfo: secUids => sdk.user.info(secUids),
       getOnlineStatus: (ids, source) => sdk.user.onlineStatus(ids, source),
       heartbeat: () => sdk.user.heartbeat(),
       activeSwitch: () => sdk.user.activeSwitch(),
@@ -1425,8 +1499,14 @@ const adapter = new (class DouYinAdapter {
       id,
     )
 
-    await this.loadFriend(id)
-    await this.loadGroup(id)
+    // 复用 cookie 校验阶段已拉取的好友/群列表写入缓存，避免二次全量翻页
+    await this.loadFriend(id, friends)
+    await this.loadGroup(id, groups)
+    // 列表拉取阶段 cookie 失效时 loadFriend/loadGroup 内部已移除账号，不再标记已连接
+    if (!Bot[id]) return false
+
+    // 后台批量补全好友抖音号等资料（50/批），不阻塞启动
+    this.enrichFriends(id).catch(err => Bot.makeLog("warn", ["好友资料补全失败", err], id))
 
     // 每 30 分钟全量刷新好友/群列表，防止缓存漂移（先清理旧定时器，避免重连后累积）
     clearInterval(this.refreshes[id])
@@ -1434,6 +1514,7 @@ const adapter = new (class DouYinAdapter {
       if (!Bot[id]) return clearInterval(refresh)
       this.loadFriend(id)
       this.loadGroup(id)
+      this.enrichFriends(id)
     }, 30 * 60000)
     refresh.unref?.()
     this.refreshes[id] = refresh
@@ -1546,6 +1627,9 @@ export class DouYinAdapter extends plugin {
             }, 5 * 60000)
           }),
       })
+
+      // 落盘本次登录使用的设备身份（未注入时由 login 注册），供紧随其后的 connect 复用，避免重复注册触发二次验证
+      adapter.saveDevice(session.userId, session.device)
 
       const token = `${session.userId}:${session.cookie}`
       if (await adapter.connect(token)) {
